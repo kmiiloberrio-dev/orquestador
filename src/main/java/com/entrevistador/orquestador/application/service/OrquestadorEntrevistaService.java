@@ -8,6 +8,7 @@ import com.entrevistador.orquestador.dominio.port.EntrevistaDao;
 import com.entrevistador.orquestador.dominio.port.jms.JmsPublisherClient;
 import com.entrevistador.orquestador.dominio.port.sse.SseService;
 import com.entrevistador.orquestador.dominio.service.ValidadorEventosSimultaneosService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.codec.ServerSentEvent;
@@ -35,9 +36,9 @@ public class OrquestadorEntrevistaService implements OrquestadorEntrevista {
     }
 
     @Override
-    public Mono<Void> enviarPreguntasFront(List<String> preguntas) {
+    public Mono<Void> enviarNotificacionFront(ObjectMapper notificacion) {
         return sseService.emitEvent(ServerSentEvent.<String>builder()
-                .data(preguntas.toString())
+                .data(notificacion)
                 .build());
     }
 
@@ -45,13 +46,19 @@ public class OrquestadorEntrevistaService implements OrquestadorEntrevista {
     public Mono<Void> receptorHojaDeVidaMatch(MensajeValidacionMatch mensajeValidacionMatch) {
         log.info("Recibiendo informacion validacion hoja de vida");
         return this.entrevistaDao.actualizarEstadoEntrevista(mensajeValidacionMatch.getIdEntrevista(), mensajeValidacionMatch.isMatchValido())
-                .then(this.validadorEventosSimultaneosService.ejecutar(mensajeValidacionMatch.getIdEntrevista()))
-                .flatMap(ragsIdsDto -> enviarInformacionEntrevistaAPreparador(ragsIdsDto, mensajeValidacionMatch.getIdEntrevista()));
+                .flatMap(() -> {
+                    if (mensajeValidacionMatch.isMatchValido()) {
+                        return this.validadorEventosSimultaneosService.ejecutar(mensajeValidacionMatch.getIdEntrevista())
+                                .flatMap(ragsIdsDto -> enviarInformacionEntrevistaAPreparador(ragsIdsDto, mensajeValidacionMatch.getIdEntrevista()));
+                    } else {
+                        return enviarPreguntasFront(mensajeValidacionMatch.getIdEntrevista());
+                    }
+                });
     }
 
     private Mono<Void> enviarInformacionEntrevistaAPreparador(RagsIdsDto ragsIdsDto, String idEntrevista) {
 
-        if(ragsIdsDto != null){
+        if (ragsIdsDto != null) {
             return this.jmsPublisherClient.generarEntrevista(SolicitudGeneracionEntrevistaDto.builder()
                             .idEntrevista(idEntrevista)
                             .idHojaDeVida(ragsIdsDto.getIdHojaDeVidaRag())
