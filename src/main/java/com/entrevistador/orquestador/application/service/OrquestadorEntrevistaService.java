@@ -1,13 +1,17 @@
 package com.entrevistador.orquestador.application.service;
 
 import com.entrevistador.orquestador.application.usescases.OrquestadorEntrevista;
+import com.entrevistador.orquestador.dominio.excepciones.NotificacionFrontendException;
 import com.entrevistador.orquestador.dominio.model.dto.MensajeValidacionMatch;
+import com.entrevistador.orquestador.dominio.model.dto.NotificacionFrontendDto;
 import com.entrevistador.orquestador.dominio.model.dto.RagsIdsDto;
 import com.entrevistador.orquestador.dominio.model.dto.SolicitudGeneracionEntrevistaDto;
+import com.entrevistador.orquestador.dominio.model.enums.NotificacionFrontendEnum;
 import com.entrevistador.orquestador.dominio.port.EntrevistaDao;
 import com.entrevistador.orquestador.dominio.port.jms.JmsPublisherClient;
 import com.entrevistador.orquestador.dominio.port.sse.SseService;
 import com.entrevistador.orquestador.dominio.service.ValidadorEventosSimultaneosService;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -36,24 +40,34 @@ public class OrquestadorEntrevistaService implements OrquestadorEntrevista {
     }
 
     @Override
-    public Mono<Void> enviarNotificacionFront(ObjectMapper notificacion) {
-        return sseService.emitEvent(ServerSentEvent.<String>builder()
-                .data(notificacion)
-                .build());
+    public Mono<Void> enviarNotificacionFront(NotificacionFrontendDto notificacion) {
+        return Mono.fromCallable(() -> new ObjectMapper().writeValueAsString(notificacion))
+                .flatMap(jsonData ->
+                        this.sseService.emitEvent(ServerSentEvent.<String>builder()
+                                .data(jsonData)
+                                .build())
+                )
+                .onErrorMap(JsonProcessingException.class, e -> {
+                    e.printStackTrace();
+                    return new NotificacionFrontendException("Error processing JSON");
+                });
     }
 
     @Override
     public Mono<Void> receptorHojaDeVidaMatch(MensajeValidacionMatch mensajeValidacionMatch) {
         log.info("Recibiendo informacion validacion hoja de vida");
         return this.entrevistaDao.actualizarEstadoEntrevista(mensajeValidacionMatch.getIdEntrevista(), mensajeValidacionMatch.isMatchValido())
-                .flatMap(() -> {
+                .then(Mono.defer(() -> {
                     if (mensajeValidacionMatch.isMatchValido()) {
                         return this.validadorEventosSimultaneosService.ejecutar(mensajeValidacionMatch.getIdEntrevista())
                                 .flatMap(ragsIdsDto -> enviarInformacionEntrevistaAPreparador(ragsIdsDto, mensajeValidacionMatch.getIdEntrevista()));
                     } else {
-                        return enviarPreguntasFront(mensajeValidacionMatch.getIdEntrevista());
+                        return enviarNotificacionFront(NotificacionFrontendDto.builder()
+                                .tipoNotificacion(NotificacionFrontendEnum.NOTIFICAR_MATCH_CV)
+                                .mensajeNotificacion(mensajeValidacionMatch.getRazonValidacion())
+                                .build());
                     }
-                });
+                }));
     }
 
     private Mono<Void> enviarInformacionEntrevistaAPreparador(RagsIdsDto ragsIdsDto, String idEntrevista) {
@@ -71,4 +85,3 @@ public class OrquestadorEntrevistaService implements OrquestadorEntrevista {
 
     }
 }
-
